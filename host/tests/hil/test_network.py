@@ -138,7 +138,7 @@ def test_network_info_format(nodes):
 
 def test_messaging_needs_a_network(nodes):
     c, _, _ = nodes
-    for cmd in ("AT+UCAST:0000=hi", "AT+BCAST:00,hi"):
+    for cmd in ("AT+UCAST:0000=hi", "AT+BCAST:00,hi", "AT+MATCHREQ:0104,01,0006,00"):
         with pytest.raises(EtrxError) as exc:
             c.cmd(cmd)
         assert exc.value.code == 0x93

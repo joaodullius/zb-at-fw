@@ -120,3 +120,20 @@ def test_sreg_get_ignores_prompts_between_value_and_ok(fake_etrx):
                                     "R309N", "F4CE36000000ABCD", "OK"]}))
     assert e.sreg_get(0x48) == "0104"
     assert e.info() == ("Telegesis nRF54L15", "R309N", "F4CE36000000ABCD")
+
+
+def test_match_sends_matchreq_and_collects_answers(fake_etrx):
+    from etrx import MatchDesc
+
+    e, m = fake_etrx(table({"AT+MATCHREQ:0104,01,0006,00": ["OK", "MatchDesc:6CBF,00,02",
+                                                          "MatchDesc:1A2B,00,0A"]}))
+    found = e.match(0x0104, [0x0006], [], timeout=0.5)
+    assert found == [MatchDesc(0x6CBF, 0, (2,)), MatchDesc(0x1A2B, 0, (0x0A,))]
+    e2, _ = fake_etrx(table({"AT+MATCHREQ:0104,00,02,0006,0008": ["OK"]}))
+    assert e2.match(0x0104, [], [0x0006, 0x0008], timeout=0.2) == []
+
+
+def test_match_keeps_identical_answers_apart(fake_etrx):
+    e, _ = fake_etrx(table({"AT+MATCHREQ:0104,01,0006,00": ["OK", "MatchDesc:6CBF,00,02",
+                                                          "MatchDesc:6CBF,00,02"]}))
+    assert len(e.match(0x0104, [0x0006], [], timeout=0.3)) == 2

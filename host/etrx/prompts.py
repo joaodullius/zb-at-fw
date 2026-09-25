@@ -86,6 +86,13 @@ class Rx:
     lqi: int | None = None
 
 
+@dataclass(frozen=True)
+class MatchDesc:
+    nwk: int
+    status: int
+    endpoints: tuple[int, ...] = ()
+
+
 _H2 = r"([0-9A-F]{2})"
 _H4 = r"([0-9A-F]{4})"
 _EUI = r"([0-9A-F]{16})"
@@ -101,6 +108,9 @@ _SIMPLE = [
     (re.compile(rf"^NEWNODE: ?{_H4},{_EUI},{_H4}$"),
      lambda m: NewNode(int(m[1], 16), m[2], int(m[3], 16))),
     (re.compile(rf"^NODELEFT: ?{_H4},{_EUI}$"), lambda m: NodeLeft(int(m[1], 16), m[2])),
+    (re.compile(rf"^MatchDesc:{_H4},{_H2}((?:,[0-9A-F]{{2}})*)$"),
+     lambda m: MatchDesc(int(m[1], 16), int(m[2], 16),
+                         tuple(int(x, 16) for x in m[3].split(",")[1:]))),
     (re.compile(rf"^(FFD|ZED|SED|MED|COO):{_EUI},{_H4}(?:,(-?\d+),(\d+))?$"),
      lambda m: Announce(m[1], m[2], int(m[3], 16), _opt_int(m[4]), _opt_int(m[5]))),
 ]

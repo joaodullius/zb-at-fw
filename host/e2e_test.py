@@ -14,7 +14,8 @@ Steps and the AT commands behind them
  2. Coordinator forms network  coordinator.py start: ATS00/ATS02/ATS03, ATS0F=1904, AT+EN
  3. Bulb joins as router       bulb.py start: ATS00/ATS03, ATS0AA, ATS0AF=0, AT+JN, EP2 setup
                                the coordinator must print NEWNODE for the bulb
- 4. Switch joins as end device switch.py start: same with ATS0AF=1 (end device)
+ 4. Switch joins as end device switch.py start: same with ATS0AF=1 (end device), then
+                               AT+MATCHREQ:0104,01,0006,00 must find the bulb (MatchDesc:)
  5. ZCL On/Off                 switch: AT+SENDUCASTB (On, Off, Toggle) -> bulb answers
                                with a Default Response (status 00) and follows each command
  6. Text unicasts              AT+UCAST:<addr>=<text> in five directions, each with ACK
@@ -142,7 +143,7 @@ def run(args: argparse.Namespace) -> int:
         info = net["info"]
         joiner = NetworkOptions(channel=info.channel, epid=info.epid, legacy=args.legacy_tc)
         bulb = Bulb(b_e, joiner, out=quiet)
-        switch = Switch(s_e, joiner, bulb_eui=eui["bulb"], out=quiet)
+        switch = Switch(s_e, joiner, out=quiet)  # finds the bulb with AT+MATCHREQ
 
         def join(node, name: str, role: str):
             mark = c_e.mark()
@@ -151,7 +152,14 @@ def run(args: argparse.Namespace) -> int:
             c_e.wait_for(lambda ev: isinstance(ev, NewNode) and ev.eui == eui[name], 15, since=mark)
 
         steps.run("bulb joins as router", lambda: join(bulb, "bulb", "FFD"), critical=True)
-        steps.run("switch joins as end device", lambda: join(switch, "switch", "ZED"), critical=True)
+        def join_switch():
+            join(switch, "switch", "ZED")
+            bulb_nwk = b_e.sreg_get(0x05)
+            check(switch.bulb_addr == bulb_nwk,
+                  f"AT+MATCHREQ found {switch.bulb_addr}, the bulb is {bulb_nwk}")
+            return f"bulb found at {bulb_nwk} by AT+MATCHREQ"
+
+        steps.run("switch joins as end device and finds the bulb", join_switch, critical=True)
 
         def zcl_on_off():
             for command, expected in ((switch.on, True), (switch.off, False), (switch.toggle, True)):

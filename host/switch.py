@@ -7,9 +7,11 @@ serial terminal (115200 8N1, commands end with Enter/CR) connected to the DK.
 What it does
 ------------
 Joins a network as an end device, exposes endpoint 2 as a Home Automation On/Off
-Switch and sends ZCL On/Off/Toggle commands to one bulb, given by its EUI64 (--bulb;
-ATI on the bulb shows it, and the coordinator prints it when the bulb joins). Each
-command waits for the bulb's ZCL Default Response and prints its status (00 = success).
+Switch and sends ZCL On/Off/Toggle commands to one bulb. The bulb is found
+automatically (AT+MATCHREQ, see below) or given by hand with --bulb <EUI64> (manual
+binding; ATI on the bulb shows its EUI64, and the coordinator prints it when the bulb
+joins). Each command waits for the bulb's ZCL Default Response and prints its status
+(00 = success).
 It also prints text messages it receives and sends text on request.
 
 AT commands sent at start-up
@@ -31,17 +33,25 @@ AT commands sent at start-up
     ATS4C=0006               endpoint 2 output cluster: On/Off
     ATZ                      only if S48-S4C changed: they take effect after a reset;
                              the module rejoins the same network on its own
+    AT+MATCHREQ:0104,01,0006,00
+                             only without --bulb: "who has an HA endpoint with the On/Off
+                             cluster as input?" Every such node answers with a prompt
+                             MatchDesc:<NWK>,00,<endpoint>; the first one becomes the bulb
 
 Interactive commands (stdin) and the AT command each one sends
 --------------------------------------------------------------
-    on / off / t             AT+SENDUCASTB:03,<bulb EUI64>,02,02,0104,0006
+    on / off / t             AT+SENDUCASTB:03,<bulb address>,02,<bulb EP>,0104,0006
                              then, after '>', the 3-byte ZCL frame 01 <seq> 01/00/02
                              (On / Off / Toggle); the bulb answers with
                              RX:...,0006,05:18<seq>0B<cmd>00 and the script prints "status 00"
+    find                     AT+MATCHREQ:0104,01,0006,00   lists the On/Off lights that answer
+                             and uses the first one (e.g. after the bulb rejoined with a new
+                             NWK address)
     say <addr> <text>        AT+UCAST:<addr>=<text>    addr: EUI64 or NWK address (0000 = coordinator)
     quit                     leaves the script (the module stays in the network)
 
-The first command to a bulb whose short address the switch does not know yet takes up
+The bulb address is its NWK address when it was found by AT+MATCHREQ, or the EUI64
+given with --bulb. The first command to a bulb whose short address the switch does not know yet takes up
 to a few seconds: the firmware asks the network for it (ZDO NWK_addr_req).
 
 End devices do not receive broadcasts sent to routers (0xFFFC, what AT+BCAST uses):
@@ -54,15 +64,20 @@ Network parameters
 
 Examples
 --------
-    python switch.py --port COM7 --bulb F4CE36000000B001 --reset
-    python switch.py --port COM7 --bulb F4CE36000000B001 --channel 20 --epid 00000000000A1B2C --reset -v
+    python switch.py --port COM7 --reset                             (finds the bulb)
+    python switch.py --port COM7 --bulb F4CE36000000B001 --reset     (manual binding)
+    python switch.py --port COM7 --channel 20 --epid 00000000000A1B2C --reset -v
 
-    switch: end device in PAN 7A31 on channel 20, bulb F4CE36000000B001
-    commands: on | off | t | say | quit
+    switch: end device in PAN 7A31 on channel 20
+    switch: On/Off light at 6CBF, endpoint(s) 02
+    switch: bulb 6CBF
+    commands: on | off | t | say | find | quit
     status 00
 
-Troubleshooting: -v shows every command and response. "ERROR:06" on on/off/t: the bulb
-EUI64 is wrong or the bulb is not in the network. A timeout after the command: the bulb
+Troubleshooting: -v shows every command and response. "bulb not found": no On/Off light
+answered AT+MATCHREQ - start bulb.py first (its endpoint 2 must declare cluster 0006),
+then type find. "ERROR:06" on on/off/t: the --bulb EUI64 is wrong or the bulb is not
+in the network. A timeout after the command: the bulb
 is not running bulb.py (nothing answers the ZCL command).
 """
 from __future__ import annotations
@@ -71,8 +86,9 @@ import argparse
 import sys
 import threading
 
-from etrx import (END_DEVICE, S0F_APP, Etrx, NetworkInfo, NetworkOptions, Rx, add_network_args,
-                  configure_endpoint2, ensure_joined, options_from_args, wait_network, zcl)
+from etrx import (END_DEVICE, S0F_APP, Etrx, MatchDesc, NetworkInfo, NetworkOptions, Rx,
+                  add_network_args, configure_endpoint2, ensure_joined, options_from_args,
+                  wait_network, zcl)
 from etrx.display import describe, repl, split_first
 from etrx.net import parse_epid
 
@@ -83,12 +99,15 @@ class Switch:
     ENDPOINT = 0x02
     DEVICE_ID = 0x0000  # HA On/Off Switch
 
-    def __init__(self, etrx: Etrx, net: NetworkOptions, bulb_eui: str, bulb_endpoint: int = 0x02,
-                 out=print):
+    def __init__(self, etrx: Etrx, net: NetworkOptions, bulb_eui: str | None = None,
+                 bulb_endpoint: int = 0x02, out=print, find_timeout: float = 5.0):
+        """bulb_eui given: manual binding to that bulb. None: find one with AT+MATCHREQ."""
         self.etrx = etrx
         self.net = net
-        self.bulb_eui = bulb_eui.upper()
+        self.manual = bulb_eui is not None
+        self.bulb_addr = bulb_eui.upper() if bulb_eui else None  # EUI64 or NWK address
         self.bulb_endpoint = bulb_endpoint
+        self.find_timeout = find_timeout
         self.out = out
         self._seq = 0
         self._lock = threading.Lock()
@@ -99,9 +118,22 @@ class Switch:
         if configure_endpoint2(self.etrx, zcl.PROFILE_HA, self.DEVICE_ID,
                                [zcl.CLUSTER_BASIC, zcl.CLUSTER_IDENTIFY], [zcl.CLUSTER_ON_OFF]):
             info = wait_network(self.etrx)
-        self.out(f"switch: end device in PAN {info.pan:04X} on channel {info.channel}, "
-                 f"bulb {self.bulb_eui}")
+        self.out(f"switch: end device in PAN {info.pan:04X} on channel {info.channel}")
+        if not self.manual:
+            self.find()
+        self.out(f"switch: bulb {self.bulb_addr or 'not found (type find)'}")
         return info
+
+    def find(self) -> list[MatchDesc]:
+        """Ask the network for On/Off lights (AT+MATCHREQ:0104,01,0006,00) and use the first."""
+        found = self.etrx.match(zcl.PROFILE_HA, [zcl.CLUSTER_ON_OFF], [], self.find_timeout)
+        for m in found:
+            self.out(f"switch: On/Off light at {m.nwk:04X}, endpoint(s) "
+                     + ", ".join(f"{ep:02X}" for ep in m.endpoints))
+        if found:
+            self.bulb_addr = f"{found[0].nwk:04X}"
+            self.bulb_endpoint = found[0].endpoints[0]
+        return found
 
     def on(self, timeout: float = 5.0) -> int:
         return self._send(zcl.CMD_ON, timeout)
@@ -119,8 +151,10 @@ class Switch:
         with self._lock:
             self._seq = (self._seq + 1) & 0xFF
             seq = self._seq
+        if self.bulb_addr is None:
+            raise ValueError("no bulb: type find, or start with --bulb <EUI64>")
         mark = self.etrx.mark()
-        self.etrx.senducastb(self.bulb_eui, self.ENDPOINT, self.bulb_endpoint, zcl.PROFILE_HA,
+        self.etrx.senducastb(self.bulb_addr, self.ENDPOINT, self.bulb_endpoint, zcl.PROFILE_HA,
                              zcl.CLUSTER_ON_OFF, zcl.on_off_command(seq, command))
         ev = self.etrx.wait_for(lambda e: self._is_response(e, seq), timeout, since=mark)
         _, status = zcl.parse_default_response(zcl.parse(ev.payload))
@@ -148,8 +182,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     add_network_args(parser, legacy_default=True)
-    parser.add_argument("--bulb", required=True, type=parse_epid, metavar="EUI64",
-                        help="EUI64 of the bulb (ATI on the bulb shows it)")
+    parser.add_argument("--bulb", type=parse_epid, metavar="EUI64",
+                        help="manual binding: EUI64 of the bulb (ATI on the bulb shows it); "
+                             "without it the switch finds a bulb with AT+MATCHREQ")
     parser.add_argument("-v", "--verbose", action="store_true", help="show the AT traffic")
     args = parser.parse_args(argv)
     etrx = Etrx.open(args.port, name="switch", log=print if args.verbose else None)
@@ -161,6 +196,7 @@ def main(argv=None) -> int:
             "off": lambda rest: f"status {sw.off():02X}",
             "t": lambda rest: f"status {sw.toggle():02X}",
             "say": lambda rest: sw.say(*split_first(rest)),
+            "find": lambda rest: None if sw.find() else "no On/Off light answered",
         })
     except KeyboardInterrupt:
         pass

@@ -50,3 +50,11 @@ def test_unknown_lines_are_none():
     assert parse_prompt("+N=COO,25,08,7A31,00000000000A1B2C") is None
     assert parse_prompt("Telegesis nRF54L15") is None
     assert parse_prompt("") is None
+
+
+def test_matchdesc():
+    from etrx.prompts import MatchDesc
+
+    assert parse_prompt("MatchDesc:6CBF,00,02") == MatchDesc(0x6CBF, 0x00, (0x02,))
+    assert parse_prompt("MatchDesc:6CBF,00,02,0A") == MatchDesc(0x6CBF, 0x00, (0x02, 0x0A))
+    assert parse_prompt("MatchDesc:6CBF,80") == MatchDesc(0x6CBF, 0x80, ())

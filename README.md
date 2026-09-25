@@ -49,8 +49,8 @@ Release build of this repository (`scripts/build.ps1`), nRF54L15 application cor
 
 | Region | Used | Available | Usage |
 |---|---|---|---|
-| RRAM (code + read-only data) | 399 096 B (≈ 390 KB) | 1524 KB | 25.6 % |
-| RAM | 91 516 B (≈ 89 KB) | 256 KB | 34.9 % |
+| RRAM (code + read-only data) | 399 704 B (≈ 390 KB) | 1524 KB | 25.6 % |
+| RAM | 91 548 B (≈ 89 KB) | 256 KB | 34.9 % |
 
 Non-volatile data uses the partitions of the Zigbee add-on layout: `storage_partition`
 (8 KB, S-registers and network state through Zephyr settings) and `zboss_nvram` (32 KB,
@@ -84,6 +84,7 @@ output goes through a ring buffer, and prompts never interleave with command res
 | `AT+BCAST:<nn>,<text>` | Text broadcast to routers and coordinator (`0xFFFC`). |
 | `AT+SENDUCAST:<addr>,<srcEP>,<dstEP>,<profile>,<cluster>,<text>` | Unicast with explicit addressing. |
 | `AT+SENDUCASTB:<len>,<addr>,<srcEP>,<dstEP>,<profile>,<cluster>` | Same, binary: after `>` send `<len>` raw bytes. |
+| `AT+MATCHREQ:<profile>,<nIn>[,<in>…],<nOut>[,<out>…]` | Find the nodes with an endpoint of this profile and at least one of these clusters (ZDO Match_Desc_req to every node with the receiver on). `OK`, then one `MatchDesc:` prompt per answering node. Up to 8 clusters per list; counts are 2 hex digits. |
 
 `<addr>` is a 4-digit network address (`0000` is always the coordinator) or a 16-digit EUI64.
 An unknown EUI64 is looked up with a ZDO NWK_addr_req (3 attempts, about 6 s in total).
@@ -93,6 +94,7 @@ does not exist, the stack gives up and prints `NACK:XX` after about a minute.
 ### Prompts
 
 `OK`, `ERROR:XX`, `SEQ:XX`, `ACK:XX`, `NACK:XX`, `JPAN:<ch>,<PAN>,<EPID>`, `LeftPAN`,
+`MatchDesc:<NWK>,<status>[,<EP>…]` (answer to `AT+MATCHREQ`: `00` and the matching endpoints),
 `NEWNODE:<NWK>,<EUI64>,<parent>` (coordinator), `FFD:`/`ZED:`/`SED:<EUI64>,<NWK>` (device
 announce), `NODELEFT:<NWK>,<EUI64>` (coordinator, `S0F` bit B),
 `UCAST:[<EUI64>,]XX=<data>[,<RSSI>,<LQI>]`, `BCAST:…`,
@@ -147,7 +149,7 @@ SSID). There is no rule that one is derived from the other.
 * `AT+BCAST` validates the hop count but uses the default radius.
 * `NEWNODE:` shows the parent as `FFFF`.
 * `AT+JN` filters on the EPID only; `AT+JPAN` with a PAN ID restricts the channel only.
-* Not implemented: `AT+PANSCAN`, `AT+ESCAN`, `AT+MATCHREQ` and the other ZDO requests,
+* Not implemented: `AT+PANSCAN`, `AT+ESCAN`, the ZDO requests other than `AT+MATCHREQ`,
   binding, multicast, sink, data mode, I/O, ADC, timers, remote S-register access,
   `S06`/`S07`. Custom TC link keys (`S09`) are stored only.
 
@@ -186,6 +188,18 @@ AT+N                                      +N=FFD,20,08,7A31,00000000000A1B2C
 
 **End device** (the switch's role): as the router, plus `ATS0AF=1:password` before `AT+JN`;
 `AT+N` then reports `ZED`.
+
+**Finding a device by function** (from any node; here a switch looks for On/Off lights,
+i.e. endpoints with profile `0104` and cluster `0006` as input, which the bulb declares
+with `ATS48=0104`, `ATS4B=0000,0003,0006` and a reset):
+
+```
+AT+MATCHREQ:0104,01,0006,00               OK
+                                          MatchDesc:6CBF,00,02    node 6CBF, endpoint 02
+```
+
+The answer gives the node's network address and endpoint, ready for
+`AT+SENDUCASTB:<len>,6CBF,02,02,0104,0006`.
 
 **Messages** (from any node):
 
@@ -249,7 +263,7 @@ examples, troubleshooting) is at the top of the file and in `python <script> --h
 |---|---|---|
 | `coordinator.py` | Generic coordinator: forms the network, prints joins, announces, leaves and received messages | `bcast <text>`, `ucast <addr> <text>`, `info` |
 | `bulb.py` | Router, HA On/Off Light on endpoint 2: follows ZCL On/Off/Toggle, answers with a Default Response | `say <addr> <text>`, `state` |
-| `switch.py` | End device, HA On/Off Switch on endpoint 2: sends ZCL On/Off/Toggle to one bulb (`--bulb <EUI64>`) | `on`, `off`, `t`, `say <addr> <text>` |
+| `switch.py` | End device, HA On/Off Switch on endpoint 2: finds a bulb with `AT+MATCHREQ` (or `--bulb <EUI64>` for manual binding) and sends it ZCL On/Off/Toggle | `on`, `off`, `t`, `find`, `say <addr> <text>` |
 | `e2e_test.py` | Runs the three roles on three DKs and checks the whole network (PASS/FAIL per step) | — |
 
 Common options: `--port`, `--channel`, `--pan` (coordinator), `--epid`, `--legacy` (joiners,
@@ -258,7 +272,7 @@ on by default), `--reset`, `-v` (show the AT traffic). Example with three termin
 ```powershell
 python coordinator.py --port COM31 --channel 20 --reset
 python bulb.py --port COM36 --channel 20 --reset
-python switch.py --port COM7 --channel 20 --reset --bulb <bulb EUI64 printed by the coordinator>
+python switch.py --port COM7 --channel 20 --reset          # finds the bulb with AT+MATCHREQ
 ```
 
 Typing `on`, `off` or `t` in the switch prints `status 00`, and the bulb prints
@@ -295,7 +309,7 @@ python e2e_test.py --coord COM31 --bulb COM36 --switch COM7
 ```
 
 The test factory-resets the three DKs, forms a network, joins the bulb (router) and the switch
-(end device), and checks ZCL On/Off control, acknowledged text unicasts in all directions, a
+(end device), checks that the switch finds the bulb with `AT+MATCHREQ`, and checks ZCL On/Off control, acknowledged text unicasts in all directions, a
 broadcast (routers only), rejoin after a reset, and that no node leaves during a soak period
 (`--soak`, 60 s by default). Use `--channel`, `--pan` and `--epid` to test a fixed network.
 
@@ -325,7 +339,6 @@ these classes instead of repeating their logic, as `e2e_test.py` does.
 
 ## Limitations
 
-See [Differences from R309](#differences-from-r309). Planned: automatic discovery of the bulb
-by the switch (`AT+MATCHREQ`), interoperability with stock Zigbee 3.0 devices (coordinator in
+See [Differences from R309](#differences-from-r309). Planned: interoperability with stock Zigbee 3.0 devices (coordinator in
 Zigbee 3.0 Trust Centre mode, joining Zigbee 3.0 networks with TC link key exchange), sleepy
 end devices and binding.

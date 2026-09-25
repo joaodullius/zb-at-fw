@@ -20,6 +20,7 @@ class Firmware:
         self.network = network
         self.regs = regs or {}
         self.log = []
+        self.match_answers = ["MatchDesc:6CBF,00,02"]
 
     def __call__(self, cmd):
         self.log.append(cmd)
@@ -38,6 +39,8 @@ class Firmware:
             return [">"]
         if cmd.startswith("AT+UCAST:"):
             return ["SEQ:02", "OK"]
+        if cmd.startswith("AT+MATCHREQ:"):
+            return ["OK", *self.match_answers]
         if cmd.startswith("ATS") and cmd.endswith("?"):
             return [self.regs.get(cmd[3:5], ""), "OK"]
         if cmd.startswith("ATS") and "=" in cmd:
@@ -175,3 +178,38 @@ def test_switch_start_joins_as_end_device(fake_etrx):
     assert info.role == "ZED"
     assert "ATS0AF=1:password" in fw.log and "ATS0AA=1:password" in fw.log
     assert "ATS4C=0006" in fw.log
+
+
+def test_switch_without_bulb_finds_it_with_matchreq(fake_etrx):
+    fw = Firmware()
+    e, m = fake_etrx(fw)
+    sw = Switch(e, NetworkOptions(legacy=True), out=lambda s: None)
+    sw.start()
+    assert "AT+MATCHREQ:0104,01,0006,00" in fw.log
+    assert (sw.bulb_addr, sw.bulb_endpoint) == ("6CBF", 0x02)
+    with pytest.raises(TimeoutError):
+        sw.on(timeout=0.3)  # no Default Response in this double; only the target matters here
+    assert "AT+SENDUCASTB:03,6CBF,02,02,0104,0006" in fw.log
+
+
+def test_switch_manual_binding_skips_discovery(fake_etrx):
+    fw = Firmware()
+    e, _ = fake_etrx(fw)
+    sw = Switch(e, NetworkOptions(legacy=True), BULB_EUI, out=lambda s: None)
+    sw.start()
+    assert not any(c.startswith("AT+MATCHREQ") for c in fw.log)
+    assert sw.bulb_addr == BULB_EUI
+
+
+def test_switch_without_answer_has_no_target(fake_etrx):
+    fw = Firmware()
+    fw.match_answers = []
+    e, _ = fake_etrx(fw)
+    sw = Switch(e, NetworkOptions(legacy=True), out=lambda s: None, find_timeout=0.3)
+    sw.start()
+    assert sw.bulb_addr is None
+    with pytest.raises(ValueError):
+        sw.toggle()
+    fw.match_answers = ["MatchDesc:1A2B,00,0A"]
+    assert [m.nwk for m in sw.find()] == [0x1A2B]
+    assert (sw.bulb_addr, sw.bulb_endpoint) == ("1A2B", 0x0A)

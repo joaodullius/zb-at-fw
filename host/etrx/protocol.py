@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .port import LineReader, SerialTransport
-from .prompts import Error, Jpan, Ok, Seq, parse_prompt
+from .prompts import Error, Jpan, MatchDesc, Ok, Seq, parse_prompt
 
 PASSWORD = "password"
 
@@ -80,6 +80,10 @@ class Etrx:
 
     def wait_for(self, pred: Callable, timeout: float, since: int | None = None):
         """Return the first prompt (from index `since`, default: now) that matches `pred`."""
+        return self._wait_index(pred, timeout, since)[0]
+
+    def _wait_index(self, pred: Callable, timeout: float, since: int | None):
+        """Like wait_for, and also return the history index just after the match."""
         deadline = time.monotonic() + timeout
         with self._cond:
             i = len(self._history) if since is None else since
@@ -88,7 +92,7 @@ class Etrx:
                     ev = self._history[i]
                     i += 1
                     if pred(ev):
-                        return ev
+                        return ev, i
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"{self.name}: no matching prompt within {timeout} s")
@@ -273,6 +277,29 @@ class Etrx:
 
     def bcast(self, text: str, hops: int = 0):
         self.cmd(f"AT+BCAST:{hops:02d},{text}")
+
+    def match(self, profile: int, in_clusters: list[int], out_clusters: list[int],
+              timeout: float = 5.0) -> list[MatchDesc]:
+        """AT+MATCHREQ: ask the network which nodes have an endpoint with this profile and
+        at least one of these clusters. Returns the successful MatchDesc answers received
+        within `timeout` seconds (one per answering node)."""
+        def part(clusters: list[int]) -> str:
+            return ",".join([f"{len(clusters):02X}", *(f"{c:04X}" for c in clusters)])
+
+        mark = self.mark()
+        self.cmd(f"AT+MATCHREQ:{profile:04X},{part(in_clusters)},{part(out_clusters)}")
+        found: list[MatchDesc] = []
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return found
+            try:
+                ev, mark = self._wait_index(lambda e: isinstance(e, MatchDesc), remaining, mark)
+            except TimeoutError:
+                return found
+            if ev.status == 0 and ev.endpoints:
+                found.append(ev)
 
     def senducast(self, addr: str, src_ep: int, dst_ep: int, profile: int, cluster: int, text: str) -> int:
         return self._seq(self.cmd(

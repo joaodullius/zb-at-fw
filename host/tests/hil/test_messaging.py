@@ -121,3 +121,27 @@ def test_too_long_is_error_74(net):
     with pytest.raises(EtrxError) as exc:
         c.ucast(b_eui, "x" * 83)
     assert exc.value.code == 0x74
+
+
+def test_matchreq_finds_the_on_off_light(net):
+    # The bulb's endpoint 2 declares the On/Off cluster as input: a switch finds it.
+    c, b, s, c_eui, b_eui, s_eui = net
+    found = s.match(0x0104, [0x0006], [], timeout=5)
+    bulb_nwk = int(b.sreg_get(0x05), 16)
+    assert any(m.nwk == bulb_nwk and m.endpoints == (0x02,) for m in found)
+    assert all(m.nwk != int(s.sreg_get(0x05), 16) for m in found)  # not the asker itself
+
+
+def test_matchreq_without_matching_node_returns_nothing(net):
+    c, b, s, *_ = net
+    assert s.match(0x0104, [0x0102], [], timeout=4) == []
+
+
+@pytest.mark.parametrize("cmd", ["AT+MATCHREQ:0104", "AT+MATCHREQ:0104,01,0006",
+                                 "AT+MATCHREQ:0104,09,0006,00", "AT+MATCHREQ:XYZW,00,00",
+                                 "AT+MATCHREQ:0104,02,0006,00"])
+def test_matchreq_bad_syntax_is_error_05(net, cmd):
+    c, *_ = net
+    with pytest.raises(EtrxError) as exc:
+        c.cmd(cmd)
+    assert exc.value.code == 0x05

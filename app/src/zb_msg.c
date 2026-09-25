@@ -484,11 +484,118 @@ static int cmd_senducastb(char *args)
 	return send_unicast(&r, sreg_bit(0x10, S10_QUIET_SEND));
 }
 
+/* ---------------------------------------------------------------------------
+ * AT+MATCHREQ: ZDO Match_Desc_req broadcast; every answer becomes a MatchDesc: prompt.
+ */
+struct match_req {
+	uint16_t profile;
+	uint8_t n_in;
+	uint8_t n_out;
+	uint16_t clusters[2 * SREG_MAX_CLUSTERS];
+};
+
+static struct match_req match_pending; /* written by the AT thread, read in match_send */
+
+static void match_resp(zb_bufid_t bufid)
+{
+	zb_zdo_match_desc_resp_t *resp = (zb_zdo_match_desc_resp_t *)zb_buf_begin(bufid);
+	zb_apsde_data_indication_t *ind = ZB_BUF_GET_PARAM(bufid, zb_apsde_data_indication_t);
+	const zb_uint8_t *ep = (const zb_uint8_t *)(resp + 1);
+	char line[16 + 3 * 32];
+	size_t n;
+
+	/* One call per answering node, then one with TIMEOUT: nothing to print for that. */
+	if (resp->status != ZB_ZDP_STATUS_TIMEOUT && resp->status != ZB_ZDP_STATUS_TIMEOUT_BY_STACK) {
+		n = snprintf(line, sizeof(line), "MatchDesc:%04X,%02X", ind->src_addr, resp->status);
+		for (int i = 0; resp->status == ZB_ZDP_STATUS_SUCCESS && i < resp->match_len &&
+				n + 3 < sizeof(line); i++) {
+			n += snprintf(&line[n], sizeof(line) - n, ",%02X", ep[i]);
+		}
+		at_print("%s", line);
+	}
+	zb_buf_free(bufid);
+}
+
+static void match_send(zb_bufid_t bufid)
+{
+	size_t n = match_pending.n_in + match_pending.n_out;
+	zb_zdo_match_desc_param_t *req =
+		zb_buf_initial_alloc(bufid, sizeof(*req) + n * sizeof(zb_uint16_t));
+
+	/* To every node with the receiver on, end devices such as switches included. */
+	req->nwk_addr = ZB_NWK_BROADCAST_RX_ON_WHEN_IDLE;
+	req->addr_of_interest = ZB_NWK_BROADCAST_RX_ON_WHEN_IDLE;
+	req->profile_id = match_pending.profile;
+	req->num_in_clusters = match_pending.n_in;
+	req->num_out_clusters = match_pending.n_out;
+	memcpy(req->cluster_list, match_pending.clusters, n * sizeof(zb_uint16_t));
+	if (zb_zdo_match_desc_req(bufid, match_resp) == ZB_ZDO_INVALID_TSN) {
+		LOG_ERR("Match_Desc_req not sent");
+		zb_buf_free(bufid);
+	}
+}
+
+/* <NN>[,<cluster>...]: a 2-digit count followed by that many 4-digit cluster IDs. */
+static int parse_cluster_list(char **p, uint8_t *count, uint16_t *out)
+{
+	char *field = next_field(p);
+	uint32_t v;
+
+	if (!field || strlen(field) != 2 || at_parse_hex_n(field, 2, &v) ||
+	    v > SREG_MAX_CLUSTERS) {
+		return AT_ERR_INVALID_PARAM;
+	}
+	*count = (uint8_t)v;
+	for (uint8_t i = 0; i < *count; i++) {
+		field = next_field(p);
+		if (!field || strlen(field) != 4 || at_parse_hex_n(field, 4, &v)) {
+			return AT_ERR_INVALID_PARAM;
+		}
+		out[i] = (uint16_t)v;
+	}
+	return AT_OK;
+}
+
+/* AT+MATCHREQ:<profile>,<NumIn>[,<InCluster>...],<NumOut>[,<OutCluster>...] */
+static int cmd_matchreq(char *args)
+{
+	struct match_req req = { 0 };
+	char *p = args + 1;
+	char *profile;
+	uint32_t v;
+	int err;
+
+	if (args[0] != ':') {
+		return AT_ERR_INVALID_PARAM;
+	}
+	profile = next_field(&p);
+	if (!profile || strlen(profile) != 4 || at_parse_hex_n(profile, 4, &v)) {
+		return AT_ERR_INVALID_PARAM;
+	}
+	req.profile = (uint16_t)v;
+	err = parse_cluster_list(&p, &req.n_in, req.clusters);
+	if (!err) {
+		err = parse_cluster_list(&p, &req.n_out, &req.clusters[req.n_in]);
+	}
+	if (err || p != NULL) {
+		return AT_ERR_INVALID_PARAM; /* malformed, or fields left over */
+	}
+	if (!zbc_joined()) {
+		return AT_ERR_NOT_JOINED;
+	}
+	match_pending = req;
+	if (zb_buf_get_out_delayed(match_send) != RET_OK) {
+		return AT_ERR_NO_BUFFERS;
+	}
+	return AT_OK;
+}
+
 const struct at_cmd zbm_cmds[] = {
 	{ "+UCAST", cmd_ucast },
 	{ "+BCAST", cmd_bcast },
 	{ "+SENDUCAST", cmd_senducast },
 	{ "+SENDUCASTB", cmd_senducastb },
+	{ "+MATCHREQ", cmd_matchreq },
 	{ NULL, NULL },
 };
 
