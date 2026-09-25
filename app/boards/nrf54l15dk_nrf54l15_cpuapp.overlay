@@ -1,0 +1,16 @@
+#include <nrf54l15_cpuapp_partitions.dtsi>
+
+/ {
+	chosen {
+		ncs,zigbee-timer = &timer20;
+	};
+};
+
+&timer20 {
+	status = "okay";
+};
+
+/* AT interface: 115200 8N1 on the console UART (DK VCOM). */
+&uart20 {
+	current-speed = <115200>;
+};
