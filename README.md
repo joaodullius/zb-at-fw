@@ -106,7 +106,7 @@ announce), `NODELEFT:<NWK>,<EUI64>` (coordinator, `S0F` bit B),
 | Reg | Meaning | Default |
 |---|---|---|
 | `S00` | Channel mask, bit 0 = channel 11 | `FFFF` |
-| `S01` | TX power [dBm] | `08` |
+| `S01` | TX power [dBm], -40 to 8. The nRF54L15 transmits at most +7 dBm in the QFN package (nRF54L15 DK) and +8 dBm in the CSP package | `07` |
 | `S02` | PAN ID for formation (0 = random) | `0000` |
 | `S03` | Extended PAN ID: formation (0 = this node's EUI64) and join filter (0 = any network) | `0000000000000000` |
 | `S04` / `S05` | Local EUI64 / network address (read only) | |
@@ -198,7 +198,7 @@ ATS03=00000000000A1B2C                    OK      join only this network
 ATS0AA=1:password                         OK      no TC link key request (legacy TC)
 AT+JN                                     JPAN:20,7A31,00000000000A1B2C
                                           OK
-AT+N                                      +N=FFD,20,08,7A31,00000000000A1B2C
+AT+N                                      +N=FFD,20,07,7A31,00000000000A1B2C
                                           OK
 ```
 

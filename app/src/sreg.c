@@ -46,7 +46,7 @@ struct sreg {
 
 static struct sreg regs[] = {
 	{ 0x00, T_U16, F_NV, 0, "FFFF" },   /* channel mask, bit 0 = channel 11 */
-	{ 0x01, T_S8, F_NV, 0, "08" },      /* TX power [dBm] */
+	{ 0x01, T_S8, F_NV, 0, "07" },      /* TX power [dBm]: 7 = max of the nRF54L15 QFN, 8 for CSP */
 	{ 0x02, T_U16, F_NV, 0, "0000" },   /* preferred PAN ID */
 	{ 0x03, T_HEX64, F_NV, 0, "0000000000000000" }, /* preferred EPID */
 	{ 0x04, T_DYN, F_RO, 0, "" },       /* local EUI64 */

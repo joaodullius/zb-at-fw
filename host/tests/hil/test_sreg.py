@@ -21,6 +21,7 @@ def err(fn, *args):
 
 def test_factory_defaults(dk):
     assert dk.sreg_get(0x00) == "FFFF"
+    assert dk.sreg_get(0x01) == "07"  # max TX power of the nRF54L15 QFN (the DK); CSP allows 8
     assert dk.sreg_get(0x02) == "0000"
     assert dk.sreg_get(0x03) == "0000000000000000"
     assert dk.sreg_get(0x0A) == "0000"
