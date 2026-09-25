@@ -32,7 +32,10 @@ LOG_MODULE_REGISTER(zb_core, LOG_LEVEL_INF);
 #define PERMIT_JOIN_REFRESH_S 150 /* steering opens the network for 180 s */
 
 #define S0A_BLOCK_JOIN_LOCAL 0x0
+#define S0A_NO_UNSECURE_REJOIN 0x3
+#define S0A_ENCRYPT_NWK_KEY  0x4
 #define S0A_BLOCK_JOIN_TC    0x5
+#define S0A_USE_S09_KEY      0x8
 #define S0A_NO_TCLK_REQUEST  0xA
 #define S0A_TYPE_LOW         0xE
 #define S0A_TYPE_HIGH        0xF
@@ -224,8 +227,32 @@ static uint8_t current_role(void)
 	}
 }
 
+/* Keys and key transport, applied before the stack starts (they are read at join time). */
+static void security_prestart(uint8_t role)
+{
+	static const uint8_t standard_key[16] = ZB_STANDARD_TC_KEY
+	uint8_t key[16];
+
+	/* S0A bit 8: preconfigured TC link key from S09, else the Zigbee default key. */
+	if (sreg_bit(0x0A, S0A_USE_S09_KEY) && sreg_bytes(0x09, key, sizeof(key)) == 0) {
+		zbc_tc_link_key_apply(key);
+	} else {
+		zbc_tc_link_key_apply(standard_key);
+	}
+	if (role == ZBC_ROLE_ZC) {
+		/* S0A bit 4 clear (R309 default): the TC sends the network key without link
+		 * key encryption (applied again in join_policy_apply, formation resets it).
+		 */
+		zbc_tc_unencrypted_key_transport(!sreg_bit(0x0A, S0A_ENCRYPT_NWK_KEY));
+	} else {
+		/* Like R309 (Ember) nodes, accept a network key sent in clear. */
+		zbc_accept_unencrypted_key_transport(true);
+	}
+}
+
 static void set_role(uint8_t role, zb_uint32_t mask)
 {
+	security_prestart(role);
 	if (role == ZBC_ROLE_ZC) {
 		zb_set_network_coordinator_role(mask);
 		/* Pre-Zigbee 3.0 devices may join and are not evicted. */
@@ -262,15 +289,85 @@ static void tx_power_set(zb_bufid_t bufid)
 	zb_set_tx_power_async(bufid);
 }
 
+/* ---------------------------------------------------------------------------
+ * Join control (ZBOSS thread). The coordinator keeps the whole network open by
+ * re-running BDB network steering (S0A bit 5 on the TC closes it network-wide);
+ * S0A bit 0 closes joining through the local node, on any node, every time the
+ * network is opened again.
+ */
+static void permit_req_done(zb_bufid_t bufid)
+{
+	zb_buf_free(bufid);
+}
+
+/* tc_significance = 1 also changes the Trust Centre policy: the TC then refuses to
+ * authorize any join, through any router (measured). 0 only closes the addressed node.
+ */
+static void permit_join_send(zb_bufid_t bufid, zb_uint16_t dest, zb_uint8_t tc_significance)
+{
+	zb_zdo_mgmt_permit_joining_req_param_t *req =
+		ZB_BUF_GET_PARAM(bufid, zb_zdo_mgmt_permit_joining_req_param_t);
+
+	req->dest_addr = dest;
+	req->permit_duration = 0;
+	req->tc_significance = tc_significance;
+	if (zb_zdo_mgmt_permit_joining_req(bufid, permit_req_done) == ZB_ZDO_INVALID_TSN) {
+		zb_buf_free(bufid);
+	}
+}
+
+/* S0A bit 0: no joining through this node. */
+static void close_local(zb_bufid_t bufid)
+{
+	permit_join_send(bufid, zb_get_short_address(), 0);
+}
+
+/* S0A bit 5 on the TC: the Trust Centre accepts no new node, whoever the parent is. */
+static void close_network(zb_bufid_t bufid)
+{
+	permit_join_send(bufid, zb_get_short_address(), 1);
+}
+
 static void permit_join_refresh(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
 
-	if (sreg_bit(0x0A, S0A_BLOCK_JOIN_LOCAL) || sreg_bit(0x0A, S0A_BLOCK_JOIN_TC)) {
+	if (sreg_bit(0x0A, S0A_BLOCK_JOIN_TC)) {
 		return;
 	}
 	if (!bdb_start_top_level_commissioning(ZB_BDB_NETWORK_STEERING)) {
 		ZB_SCHEDULE_APP_ALARM(permit_join_refresh, 0, ZB_TIME_ONE_SECOND * 5);
+	}
+}
+
+/* Apply S0A bits 0, 3 and 5 now (after joining, or when S0A is written). */
+static void join_policy_apply(zb_uint8_t param)
+{
+	ARG_UNUSED(param);
+
+	if (!ZB_JOINED()) {
+		return;
+	}
+	if (current_role() == ZBC_ROLE_ZC) {
+		zbc_tc_rejoin_apply(!sreg_bit(0x0A, S0A_NO_UNSECURE_REJOIN));
+		zbc_tc_unencrypted_key_transport(!sreg_bit(0x0A, S0A_ENCRYPT_NWK_KEY));
+		zbc_tc_authenticate_always(sreg_bit(0x0A, S0A_BLOCK_JOIN_LOCAL));
+		ZB_SCHEDULE_APP_ALARM_CANCEL(permit_join_refresh, ZB_ALARM_ANY_PARAM);
+		if (sreg_bit(0x0A, S0A_BLOCK_JOIN_TC)) {
+			(void)zb_buf_get_out_delayed(close_network);
+			return;
+		}
+		/* Opens the network; the PERMIT_JOIN_STATUS signal then applies bit 0. */
+		ZB_SCHEDULE_APP_CALLBACK(permit_join_refresh, 0);
+	} else if (sreg_bit(0x0A, S0A_BLOCK_JOIN_LOCAL)) {
+		(void)zb_buf_get_out_delayed(close_local);
+	}
+}
+
+void sreg_written(uint16_t id)
+{
+	if (id == 0x0A && zbc_joined()) {
+		ZB_SCHEDULE_APP_CALLBACK(join_policy_apply, 0);
 	}
 }
 
@@ -283,9 +380,9 @@ static void network_up(void)
 	}
 	(void)zb_buf_get_out_delayed(tx_power_set);
 	if (role == ZBC_ROLE_ZC) {
-		zbc_legacy_tc_apply(sreg_u32(0xE0) == 0);
-		ZB_SCHEDULE_APP_CALLBACK(permit_join_refresh, 0);
+		zbc_legacy_tc_apply(true); /* R309 is a pre-Zigbee 3.0 Trust Centre */
 	}
+	ZB_SCHEDULE_APP_CALLBACK(join_policy_apply, 0);
 	print_jpan();
 }
 
@@ -384,6 +481,16 @@ void zboss_signal_handler(zb_bufid_t bufid)
 			k_work_reschedule(&reboot_work, K_MSEC(200));
 		}
 	} break;
+
+	case ZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
+		/* The network was opened (e.g. by the coordinator's steering): S0A bit 0
+		 * keeps joining through this node closed.
+		 */
+		if (*ZB_ZDO_SIGNAL_GET_PARAMS(hdr, zb_uint8_t) > 0 &&
+		    sreg_bit(0x0A, S0A_BLOCK_JOIN_LOCAL)) {
+			(void)zb_buf_get_out_delayed(close_local);
+		}
+		break;
 
 	case ZB_ZDO_SIGNAL_DEVICE_ANNCE:
 		print_announce(ZB_ZDO_SIGNAL_GET_PARAMS(hdr, zb_zdo_signal_device_annce_params_t));

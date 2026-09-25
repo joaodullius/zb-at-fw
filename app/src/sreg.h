@@ -21,6 +21,9 @@ void sreg_factory_reset(void);
 int sreg_at_command(char *arg);
 int sreg_cmd_tokdump(char *args);
 
+/* Called after a register was written (weak default in sreg.c does nothing). */
+void sreg_written(uint16_t id);
+
 /* Read-only registers owned by the Zigbee glue (S04, S05, S0D). Weak default in sreg.c. */
 int sreg_dynamic_read(uint16_t id, char *out, size_t len);
 

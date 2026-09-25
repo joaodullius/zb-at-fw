@@ -15,14 +15,14 @@ target_sources(app PRIVATE
   src/at_cmd.c
   src/sreg.c
   src/zb_core.c
-  src/zb_legacy_tc.c
+  src/zb_secpol.c
   src/zb_msg.c
   src/zboss_mem_globals.c
 )
 
-# zb_legacy_tc.c changes the ZBOSS Trust Center policy, which only the internal
+# zb_secpol.c changes the ZBOSS security policy and keys, which only the internal
 # ZBOSS headers expose (the add-on builds lib/zboss/src with them too).
-set_source_files_properties(src/zb_legacy_tc.c PROPERTIES
+set_source_files_properties(src/zb_secpol.c PROPERTIES
   INCLUDE_DIRECTORIES ${ZEPHYR_NCS_ZIGBEE_MODULE_DIR}/lib/zboss/src/include
 )
 

@@ -73,8 +73,12 @@ static struct sreg regs[] = {
 	{ 0x4B, T_CLUSTERS, F_NV, 0, "" },  /* endpoint 2 input clusters */
 	{ 0x4C, T_CLUSTERS, F_NV, 0, "" },  /* endpoint 2 output clusters */
 	{ 0x4E, T_U16, F_NV, 0, "0000" },   /* end device poll timeout (stored only) */
-	{ 0xE0, T_U8, F_NV, 0, "00" },      /* vendor: 0 = legacy TC, 1 = Zigbee 3.0 TC */
 };
+
+__weak void sreg_written(uint16_t id)
+{
+	ARG_UNUSED(id);
+}
 
 __weak int sreg_dynamic_read(uint16_t id, char *out, size_t len)
 {
@@ -381,6 +385,7 @@ static int write_reg(struct sreg *r, int bit, char *arg)
 	strcpy(r->val, value);
 	persist(r);
 	apply_side_effects(r);
+	sreg_written(r->id);
 	return AT_OK;
 }
 

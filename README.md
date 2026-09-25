@@ -49,8 +49,8 @@ Release build of this repository (`scripts/build.ps1`), nRF54L15 application cor
 
 | Region | Used | Available | Usage |
 |---|---|---|---|
-| RRAM (code + read-only data) | 399 704 B (≈ 390 KB) | 1524 KB | 25.6 % |
-| RAM | 91 548 B (≈ 89 KB) | 256 KB | 34.9 % |
+| RRAM (code + read-only data) | 400 064 B (≈ 391 KB) | 1524 KB | 25.6 % |
+| RAM | 91 492 B (≈ 89 KB) | 256 KB | 34.9 % |
 
 Non-volatile data uses the partitions of the Zigbee add-on layout: `storage_partition`
 (8 KB, S-registers and network state through Zephyr settings) and `zboss_nvram` (32 KB,
@@ -111,8 +111,8 @@ announce), `NODELEFT:<NWK>,<EUI64>` (coordinator, `S0F` bit B),
 | `S03` | Extended PAN ID: formation (0 = this node's EUI64) and join filter (0 = any network) | `0000000000000000` |
 | `S04` / `S05` | Local EUI64 / network address (read only) | |
 | `S08` | Network key for formation (0 = random; write only, password) | 0 |
-| `S09` | TC link key (write only, password; stored only) | `ZigBeeAlliance09` |
-| `S0A` | Main function (password): bits F–E device type (`00` router, `10` end device, `01` SED, `11` MED), A no TC link key request, 6 RSSI/LQI on `RX:`, 5 and 0 block joining (coordinator) | `0000` |
+| `S09` | Preconfigured Trust Centre link key, used when `S0A` bit 8 is set (write only, password) | `ZigBeeAlliance09` |
+| `S0A` | Main function (password), see [Security and join control](#security-and-join-control): bits F–E device type (`00` router, `10` end device, `01` SED, `11` MED), A no TC link key request, 8 use the `S09` link key, 6 RSSI/LQI on `RX:`, 5 TC blocks joining network-wide, 4 send the network key encrypted, 3 no unsecured rejoin, 0 no joining through this node | `0000` |
 | `S0B` | User readable name | empty |
 | `S0C` | Password (write only) | `password` |
 | `S0D` | Device information (read only) | |
@@ -121,7 +121,22 @@ announce), `NODELEFT:<NWK>,<EUI64>` (coordinator, `S0F` bit B),
 | `S12` | UART: high byte must be `0C` (115200); bit 4 turns echo off | `0C00` |
 | `S40`–`S45` | Endpoints, cluster and profile used by `AT+UCAST`/`AT+BCAST` | `0101`, `0002`, `C091` |
 | `S48`–`S4C` | Endpoint 2: profile, device ID, version, input and output clusters (applied after a reset) | `C091`, `0000`, `00`, empty, empty |
-| `SE0` | Vendor extension: 0 = legacy Trust Centre, 1 = Zigbee 3.0 Trust Centre | `00` |
+
+### Security and join control
+
+Everything is set with `S09` and `S0A` bits, as in R309, before `AT+EN` / `AT+JN` unless noted.
+
+| Setting | Coordinator (Trust Centre) | Router / end device |
+|---|---|---|
+| `S09` + `S0A` bit 8: preconfigured TC link key | Encrypts the network key it sends with the `S09` key (instead of `ZigBeeAlliance09`) | Uses the `S09` key to decrypt the network key |
+| `S0A` bit 4: send the network key encrypted | Clear (R309 default): the network key is sent without link key encryption, so the link keys do not matter. Set: encrypted, joining nodes need the same link key | — (a joining node accepts both, like R309 nodes) |
+| `S0A` bit 3: no unsecured rejoin | Refuses Trust Centre (unsecured) rejoins | — |
+| `S0A` bit 5: block joining network-wide | The Trust Centre accepts no new node, whatever its parent (takes effect at once) | — |
+| `S0A` bit 0: no joining through this node | Closes joining through the coordinator; routers can still let nodes in (takes effect at once) | Closes joining through this router, also when the network is opened again (takes effect at once) |
+| `S0A` bit A: no TC link key request | — | Needed to stay in a pre-Zigbee 3.0 network, such as the one this firmware's coordinator forms |
+
+Writing `S0A` needs the password (`ATS0A<bit>=1:password`, see `S0C`). A new `S09` key is
+used from the next `AT+EN` / `AT+JN`.
 
 ### Network parameters: where to set the channel, PAN ID and extended PAN ID
 
@@ -143,15 +158,16 @@ SSID). There is no rule that one is derived from the other.
 * `ATI` reports `nRF54L15` / `R309N`.
 * Sleepy and mobile end devices (`S0A` = `01`/`11`) join as non-sleepy end devices.
 * `AT+DASSL` and `AT&F` reset the module after leaving.
-* The coordinator is a legacy (pre-Zigbee 3.0) Trust Centre by default: it ignores TC link key
-  requests, so joining nodes set `S0A` bit A. `SE0=1` selects Zigbee 3.0 behaviour.
+* The coordinator is a pre-Zigbee 3.0 Trust Centre, like R309: it ignores the TC link key
+  requests of Zigbee 3.0 nodes, so joining nodes set `S0A` bit A.
 * The sender EUI64 in `UCAST:`/`BCAST:`/`RX:` is shown when the node knows it.
 * `AT+BCAST` validates the hop count but uses the default radius.
 * `NEWNODE:` shows the parent as `FFFF`.
 * `AT+JN` filters on the EPID only; `AT+JPAN` with a PAN ID restricts the channel only.
 * Not implemented: `AT+PANSCAN`, `AT+ESCAN`, the ZDO requests other than `AT+MATCHREQ`,
   binding, multicast, sink, data mode, I/O, ADC, timers, remote S-register access,
-  `S06`/`S07`. Custom TC link keys (`S09`) are stored only.
+  `S06`/`S07`. `S0A` bit 2 (network key encryption on unsecured rejoin) is stored only:
+  the stack always encrypts it.
 
 ## Using the module from a serial terminal
 
